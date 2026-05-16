@@ -175,6 +175,19 @@ LC_ALL=C chroot "$ROOTFS_DIR" /bin/bash -c "
       emerge --ask=n --usepkgonly --getbinpkg --binpkg-respect-use=n \$pkg
     done
   }
+  
+  # FIX: Disable systemd-tmpfiles OpenRC services
+  # systemd-tmpfiles-setup-dev and systemd-tmpfiles-setup are OpenRC services
+  # installed by sys-apps/systemd-utils. They try to talk to systemd D-Bus,
+  # which doesn't exist on our OpenRC-only system. They also trigger the
+  # EPROTO/\"Protocol driver not attached\" error even with patches because
+  # the patched systemd-tmpfiles binary is called by these wrapper services.
+  # Remove these services completely - we don't need systemd-tmpfiles.
+  rm -f /etc/init.d/systemd-tmpfiles-setup-dev /etc/init.d/systemd-tmpfiles-setup 2>/dev/null || true
+  rm -rf /etc/runlevels/boot/systemd-tmpfiles-setup-dev /etc/runlevels/boot/systemd-tmpfiles-setup 2>/dev/null || true
+  rm -rf /etc/runlevels/shutdown/systemd-tmpfiles-setup-dev /etc/runlevels/shutdown/systemd-tmpfiles-setup 2>/dev/null || true
+  rm -rf /etc/runlevels/default/systemd-tmpfiles-setup-dev /etc/runlevels/default/systemd-tmpfiles-setup 2>/dev/null || true
+  echo '[FIX] systemd-tmpfiles OpenRC services disabled'
 "
 
 # ─── Finalize ─────────────────────────────────────────────────────────────────

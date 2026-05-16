@@ -24,6 +24,21 @@ _step() { printf '\n\033[1;32m  ---> %s\033[0m\n' "$*"; }
 
 _log "shimboot-gentoo-2 :: in-chroot Gentoo setup"
 
+# ─── CRITICAL FIX: Disable systemd-tmpfiles OpenRC services ─────────────────
+# These are installed by sys-apps/systemd-utils (udev provider) but they:
+# 1. Try to talk to systemd D-Bus (which doesn't exist on OpenRC-only system)
+# 2. Trigger EPROTO/"Protocol driver not attached" on ChromeOS kernel's pivot_root
+# This caused boot to hang forever after "Starting local" in the shimboot selector.
+_step "Disabling systemd-tmpfiles services (CRITICAL FIX)"
+for svc in systemd-tmpfiles-setup-dev systemd-tmpfiles-setup; do
+  rm -f "/etc/init.d/$svc" 2>/dev/null || true
+  for rl in boot shutdown default; do
+    rm -rf "/etc/runlevels/$rl/$svc" 2>/dev/null || true
+  done
+  _log "  removed: $svc"
+done
+_log "  systemd-tmpfiles services disabled"
+
 # ─── Hostname ────────────────────────────────────────────────────────────────
 _step "Hostname"
 [ -z "$HOSTNAME" ] && HOSTNAME="shimboot-gentoo"
@@ -117,6 +132,7 @@ for s in fsck root localmount hwclock loopback hostname sysctl modules; do
   _enable_svc "$s" boot
 done
 _enable_svc local        default
+
 # R10 FIX: Do NOT enable netmount in default runlevel.
 # In Gentoo's OpenRC, NetworkManager provides the "net" virtual only AFTER it
 # establishes a connection. On a fresh Chromebook boot with no saved Wi-Fi
