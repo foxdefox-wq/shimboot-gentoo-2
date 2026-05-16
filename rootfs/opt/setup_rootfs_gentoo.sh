@@ -51,6 +51,12 @@ _enable_svc() {
   _log "  enabled: $svc @ $runlevel"
 }
 
+_disable_svc() {
+  local svc="$1" runlevel="${2:-default}"
+  rc-update del "$svc" "$runlevel" >/dev/null 2>&1 || true
+  rm -f "/etc/runlevels/$runlevel/$svc"
+}
+
 _install_stub_service() {
   local svc="$1" provide_name="$2" desc="$3"
   local backup="/etc/init.d/${svc}.shimboot-orig"
@@ -111,12 +117,33 @@ for s in fsck root localmount hwclock loopback hostname sysctl modules; do
   _enable_svc "$s" boot
 done
 _enable_svc local        default
-_enable_svc netmount     default
+# R10 FIX: Do NOT enable netmount in default runlevel.
+# In Gentoo's OpenRC, NetworkManager provides the "net" virtual only AFTER it
+# establishes a connection. On a fresh Chromebook boot with no saved Wi-Fi
+# profile, NM stays "inactive" indefinitely. Any service in the default runlevel
+# that "need"s "net" (like netmount) will then block OpenRC from completing the
+# runlevel transition, causing boot to hang forever after "Starting local".
+# netmount is only useful for mounting NFS/CIFS shares at boot — not needed here.
+# _enable_svc netmount     default   <-- intentionally disabled
 
 # 4. Networking
 _step "Enabling networking services"
 _enable_svc dbus           default
 _enable_svc NetworkManager default
+
+# R10 FIX: rc.conf tweaks
+# - rc_autostart_user="NO" prevents OpenRC 0.62+ from trying to start user
+#   sessions via pam_openrc on login. Without elogind/XDG_RUNTIME_DIR this
+#   results in a failing "user.user" dynamic service.
+# - rc_parallel="YES" speeds up boot slightly (safe for our use case).
+_step "Patching /etc/rc.conf"
+mkdir -p /etc
+# Append only if not already present
+grep -qx 'rc_autostart_user="NO"' /etc/rc.conf 2>/dev/null \
+  || echo 'rc_autostart_user="NO"' >> /etc/rc.conf
+grep -qx 'rc_parallel="YES"'      /etc/rc.conf 2>/dev/null \
+  || echo 'rc_parallel="YES"'      >> /etc/rc.conf
+_log "  rc.conf patched"
 
 # 5. WiFi Drivers (R6 FIX)
 _step "Configuring WiFi drivers"
@@ -199,5 +226,3 @@ scan-rand-mac-address=no
 match-device=interface-name:wlan0
 managed=1
 NM_EOF
-
-
