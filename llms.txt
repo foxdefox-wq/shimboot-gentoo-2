@@ -1,40 +1,86 @@
 # shimboot-gentoo-2 :: LLM handoff
 
-Last updated: 2026-05-15 (R7 — systemd-utils 260.1 patch refresh)
+Last updated: 2026-05-16 (R8 — fix stale user-patch cache + patch line numbers)
 Target hardware/log: dedede / ChromeOS shim kernel `5.4.85-22138-ga9994f5cad40` / Gentoo OpenRC + sysvinit
 
 ---
 
+## R8 build fix
 
-## R7 build fix
+### Problem
 
-A rebuild failed in `sys-apps/systemd-utils-260.1-r1` during Portage `src_prepare` because the R6 user patch `patches/systemd-chase-statx-chromeos.patch` no longer matched systemd 260.1's `src/basic/chase.c`:
+Rebuilding with the R6/R7 patches failed during Portage's `src_prepare` phase:
 
 ```text
 Applying systemd-chase-statx-chromeos.patch ...
+patching file src/basic/chase.c
 Hunk #1 FAILED at 40.
 Hunk #2 FAILED at 48.
+2 out of 2 hunks FAILED
 ```
 
-Root cause: the R6 patch was written against a `chase.c` layout that had a small `chase_statx()` helper near the top of the file. In systemd 260.1, `chaseat()` contains direct `xstatx_full(..., XSTATX_MNT_ID_BEST, ...)` calls instead, so the old hunks cannot apply.
+### Root cause
 
-R7 rewrites `patches/systemd-chase-statx-chromeos.patch` for systemd 260.1:
+The error reports **2 hunks** failing at **lines 40 and 48**, but the current
+repo's `systemd-chase-statx-chromeos.patch` has **8 hunks** starting at
+**lines 108 and 297**. This mismatch proves the build used a **stale patch
+from a cached rootfs**, not the current repo's version.
 
-- adds a new local helper `chase_xstatx(int fd, unsigned mask, struct statx *ret)`;
-- first tries the original `xstatx_full(..., XSTATX_MNT_ID_BEST, ...)` behavior;
-- on ChromeOS shim/pivot-root related failures (`EPROTO`, `EUNATCH`, `EINVAL`, `ENOSYS`, `EOPNOTSUPP`), retries without mount-ID probing;
-- replaces all six mount-ID-probing `xstatx_full()` calls in `chaseat()` with `chase_xstatx()`.
+`build_complete.sh` skips the rootfs bootstrap if the `$rootfs_dir` already
+exists. A previous build (R5 or earlier) left old patches in
+`$rootfs_dir/etc/portage/patches/sys-apps/systemd-utils/`. When the user
+re-ran `build_complete.sh` after committing R6 patches, the cached rootfs
+was reused and `build_rootfs_gentoo.sh` was never re-executed, so the old
+2-hunk patch (written for systemd ~255/256) remained and failed against
+systemd 260.1.
 
-Validation performed for R7:
+### Verification
+
+Both patches in the current repo apply cleanly against a freshly downloaded
+`systemd-260.1.tar.gz` with zero offsets:
 
 ```bash
-patch -p1 -f -g0 --no-backup-if-mismatch < patches/systemd-chase-statx-chromeos.patch
-patch -p1 -f -g0 --no-backup-if-mismatch < patches/systemd-mountpoint-util-chromeos.patch
+wget -q https://github.com/systemd/systemd/archive/refs/tags/v260.1.tar.gz
+tar xzf v260.1.tar.gz systemd-260.1/src/basic/{chase.c,mountpoint-util.c}
+cd systemd-260.1
+patch -p1 -f -g0 --no-backup-if-mismatch < patches/systemd-chase-statx-chromeos.patch     # OK
+patch -p1 -f -g0 --no-backup-if-mismatch < patches/systemd-mountpoint-util-chromeos.patch  # OK
 ```
 
-against a clean systemd `v260.1` tree. Both patches apply; the mountpoint patch applies with the expected line offset.
+### R8 fixes
 
-Note: the `/usr/src/linux` kernel-source warning in the build log is not the fatal error here. The fatal error is solely the stale user patch rejection.
+1. **`patches/systemd-mountpoint-util-chromeos.patch`** — regenerated with correct
+   line numbers for systemd v260.1 (`mount_nofollow` is at line 555, not 658).
+   Previously applied with a 100-line offset; now applies at offset 0.
+
+2. **`build_rootfs_gentoo.sh`** — now **wipes** the portage user-patch directory
+   before copying fresh patches (`rm -rf` then `mkdir -p`). Also writes a
+   `.shimboot-patch-stamp` file (sha256 of all repo patches) so stale rootfs
+   can be detected.
+
+3. **`build_complete.sh`** — when a cached rootfs exists, computes the current
+   patch stamp and compares it to the cached stamp. On mismatch, automatically
+   deletes the stale rootfs and forces a full rebuild. This prevents the exact
+   failure mode that caused the R8 error.
+
+### What you need to do
+
+**Option A** (recommended): Delete the stale rootfs and rebuild from scratch:
+
+```bash
+cd shimboot-gentoo-2
+sudo rm -rf data/rootfs_dedede_gentoo
+sudo ./build_complete.sh dedede
+```
+
+**Option B**: The updated `build_complete.sh` will auto-detect the stale patches
+and delete the rootfs for you, so you can just:
+
+```bash
+cd shimboot-gentoo-2
+git pull   # or copy the updated files
+sudo ./build_complete.sh dedede
+```
 
 ---
 
@@ -80,7 +126,7 @@ rc_autostart_user="NO"
 
 ---
 
-## R6 fixes implemented
+## R6 fixes implemented (still current)
 
 ### 1. Force full Intel Wi-Fi stack
 
@@ -126,13 +172,15 @@ R5 only ran `depmod` when `.ko.gz` files were decompressed. R6 runs `depmod -b <
 
 Files:
 
-- `patches/systemd-mountpoint-util-chromeos.patch` (existing)
-- `patches/systemd-chase-statx-chromeos.patch` (new)
-- `build_rootfs_gentoo.sh`
+- `patches/systemd-mountpoint-util-chromeos.patch` (updated R8: correct line numbers)
+- `patches/systemd-chase-statx-chromeos.patch` (unchanged from R7)
+- `build_rootfs_gentoo.sh` (updated R8: wipe stale patches, write stamp)
 
 `build_rootfs_gentoo.sh` now installs all `patches/systemd-*.patch` into Portage's `sys-apps/systemd-utils` patch directory.
 
-The new chase patch makes `chase_statx()` retry without mount-id probing if the ChromeOS shim kernel/mount tree returns errors such as `EPROTO` (`Protocol driver not attached`). This is intended to reduce `udevadm`/`systemd-tmpfiles` noise and may allow `udev-trigger` to work, but Wi-Fi no longer depends on it.
+The chase patch makes `chase_xstatx()` retry without mount-id probing if the ChromeOS shim kernel/mount tree returns errors such as `EPROTO` (`Protocol driver not attached`). This is intended to reduce `udevadm`/`systemd-tmpfiles` noise and may allow `udev-trigger` to work, but Wi-Fi no longer depends on it.
+
+The mountpoint-util patch replaces `mount_nofollow()` (which requires `/proc/self/fd/`) with a plain `mount()` call for the ChromeOS shim environment.
 
 ### 5. Disable OpenRC user-service autostart correctly
 
@@ -179,16 +227,14 @@ Now logs:
 
 ---
 
-## Files changed in R6
+## Files changed in R8
 
 | File | Change |
 |------|--------|
-| `rootfs/opt/setup_rootfs_gentoo.sh` | Force full Wi-Fi stack; add `shimboot-wifi`; disable OpenRC user autostart; configure NetworkManager; guard greeter on interactive TTY. |
-| `patch_rootfs.sh` | Always run `depmod`; re-apply Wi-Fi modprobe override after copying recovery config. |
-| `patches/systemd-chase-statx-chromeos.patch` | New systemd-utils patch: fallback when statx mount-id probing fails with shimboot mount topology. |
-| `build_rootfs_gentoo.sh` | Install all `patches/systemd-*.patch` into Portage patch dir. |
-| `rootfs/usr/local/bin/shimboot_bootdiag` | Expanded Wi-Fi/module/udev/mount diagnostics. |
-| `llms.txt` | Updated with R6 findings and instructions. |
+| `patches/systemd-mountpoint-util-chromeos.patch` | Regenerated with correct line numbers for systemd 260.1 (zero offset). |
+| `build_rootfs_gentoo.sh` | Wipe stale patch dir before copying; write `.shimboot-patch-stamp`. |
+| `build_complete.sh` | Auto-detect stale patches in cached rootfs via stamp comparison; force rebuild on mismatch. |
+| `llms.txt` | Updated with R8 findings. |
 
 ---
 
@@ -239,4 +285,6 @@ The next thing to check would be whether `/lib/modules/<kernel>/.../iwlmvm.ko` e
 | R1-R3 | Blank screen | Various inittab/agetty fixes | Unsuccessful until display diagnostics. |
 | R4 | No fbdev on shim 5.4 | Keep frecon; use console pty | Login prompt visible. |
 | R5 | Missing Wi-Fi guessed as stubbed udev/localmount | Un-stub udev-trigger/localmount; load only `iwlwifi`; disable runlevel `user` | Incomplete: `/run` was fine; `iwlwifi` loaded but no `iwlmvm`; `user.user` persisted. |
-| R6 | No Wi-Fi because full Intel op_mode stack not loaded; OpenRC user autostart enabled; udev chase errors | Force `cfg80211 mac80211 iwlwifi iwlmvm`; add `shimboot-wifi`; always `depmod`; add systemd-utils chase fallback; set `rc_autostart_user="NO"` | Expected: Wi-Fi interface appears and `user.user` noise stops. |
+| R6 | No Wi-Fi because full Intel op_mode stack not loaded; OpenRC user autostart enabled; udev chase errors | Force `cfg80211 mac80211 iwlwifi iwlmvm`; add `shimboot-wifi`; always `depmod`; add systemd-utils chase fallback; set `rc_autostart_user="NO"` | Build failed — stale cached rootfs used old patches. |
+| R7 | `llms.txt` described rewriting the chase patch for 260.1 | Rewrote `systemd-chase-statx-chromeos.patch` to target correct functions/lines | Patch in repo is correct but user's cached rootfs still had old version. |
+| R8 | Stale rootfs cache had old 2-hunk patch from R5/earlier; mountpoint patch had 100-line offset | Wipe stale patch dir; add stamp-based cache invalidation; regenerate mountpoint patch with correct line numbers | Expected: patches apply; build completes; Wi-Fi stack loads. |

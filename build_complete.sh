@@ -310,13 +310,39 @@ else
 fi
 
 # ─── Build or reuse rootfs ────────────────────────────────────────────────────
+
+# Compute a stamp of the current repo's systemd-utils patches so we can detect
+# stale patches in a cached rootfs and force a rebuild automatically.
+current_patch_stamp=""
+if ls patches/systemd-*.patch >/dev/null 2>&1; then
+  current_patch_stamp="$(sha256sum patches/systemd-*.patch 2>/dev/null | sha256sum | cut -d' ' -f1)"
+fi
+
 if [ "$existing_rootfs_dir" ]; then
   print_title "Using pre-built rootfs: $existing_rootfs_dir"
   rootfs_dir="$(realpath -m "$existing_rootfs_dir")"
 else
   print_title "Building $distro rootfs for board: $board"
 
+  needs_rebuild=false
   if [ ! -d "$rootfs_dir" ] || [ -z "$(ls -A "$rootfs_dir" 2>/dev/null)" ]; then
+    needs_rebuild=true
+  elif [ -n "$current_patch_stamp" ]; then
+    cached_stamp=""
+    stamp_file="$rootfs_dir/etc/portage/patches/sys-apps/systemd-utils/.shimboot-patch-stamp"
+    [ -f "$stamp_file" ] && cached_stamp="$(cat "$stamp_file")"
+    if [ "$cached_stamp" != "$current_patch_stamp" ]; then
+      print_warn "Detected stale systemd-utils patches in cached rootfs!"
+      print_warn "Cached stamp : ${cached_stamp:-<none>}"
+      print_warn "Current stamp: $current_patch_stamp"
+      print_warn "Deleting stale rootfs to force a clean rebuild."
+      rm -rf "$rootfs_dir"
+      mkdir -p "$rootfs_dir"
+      needs_rebuild=true
+    fi
+  fi
+
+  if $needs_rebuild; then
     ./build_rootfs.sh "$rootfs_dir" "$release" \
       "distro=$distro" \
       "arch=$arch" \

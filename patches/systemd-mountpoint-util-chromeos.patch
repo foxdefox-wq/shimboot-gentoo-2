@@ -1,8 +1,6 @@
-diff --git a/src/basic/mountpoint-util.c b/src/basic/mountpoint-util.c
-index e8471d5..9fd2d1f 100644
 --- a/src/basic/mountpoint-util.c
 +++ b/src/basic/mountpoint-util.c
-@@ -658,25 +658,7 @@ int mount_nofollow(
+@@ -558,25 +558,7 @@ int mount_nofollow(
                  const char *filesystemtype,
                  unsigned long mountflags,
                  const void *data) {
@@ -27,5 +25,5 @@ index e8471d5..9fd2d1f 100644
 -        return mount_fd(source, fd, filesystemtype, mountflags, data);
 +        return mount(source, target, filesystemtype, mountflags, data) < 0 ? -errno : 0;
  }
-
+ 
  const char* mount_propagation_flag_to_string(unsigned long flags) {

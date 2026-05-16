@@ -113,12 +113,25 @@ REPOSCONF
 
 # ─── ChromeOS systemd-utils patches ───────────────────────────────────────────
 print_step "Installing ChromeOS systemd-utils patches"
+
+# IMPORTANT: Wipe any stale patches from a previous build first.
+# A stale rootfs may contain patches written for an older systemd version that
+# no longer apply, causing the exact "Hunk #N FAILED" error that prompted R7.
+rm -rf "$ROOTFS_DIR/etc/portage/patches/sys-apps/systemd-utils"
 mkdir -p "$ROOTFS_DIR/etc/portage/patches/sys-apps/systemd-utils"
+
+patch_count=0
 for patch in patches/systemd-*.patch; do
   [ -f "$patch" ] || continue
   cp "$patch" "$ROOTFS_DIR/etc/portage/patches/sys-apps/systemd-utils/$(basename "$patch")"
   print_info "  installed patch: $(basename "$patch")"
+  patch_count=$((patch_count + 1))
 done
+print_info "  $patch_count patch(es) installed"
+
+# Write a stamp so build_complete.sh can detect stale patches in cached rootfs.
+sha256sum patches/systemd-*.patch 2>/dev/null | sha256sum | cut -d' ' -f1 \
+  > "$ROOTFS_DIR/etc/portage/patches/sys-apps/systemd-utils/.shimboot-patch-stamp"
 
 # Force systemd-utils to be built from source so the patches are applied.
 # We no longer pin it to <260 to avoid dependency conflicts with other binpkgs.
