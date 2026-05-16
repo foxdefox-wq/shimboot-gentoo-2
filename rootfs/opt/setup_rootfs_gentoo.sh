@@ -100,7 +100,7 @@ _install_stub_service hwclock      clock   "Bypassing hardware clock access on s
 _install_stub_service swclock      clock   "Bypassing software clock restore on shimboot"
 
 # 2. kill-frecon service
-_step "Installing kill-frecon service (NOT auto-enabled)"
+_step "Installing kill-frecon service (auto-enabled in sysinit)"
 cat > /etc/init.d/kill-frecon <<'KILL_FRECON_RC'
 #!/sbin/openrc-run
 description="Kill frecon-lite to hand off DRM master to Xorg/Wayland"
@@ -122,6 +122,7 @@ chmod +x /etc/init.d/kill-frecon
 # 3. Enable services
 _step "Enabling core services"
 for s in sysfs devfs dmesg udev udev-trigger; do _enable_svc "$s" sysinit; done
+_enable_svc kill-frecon sysinit
 for s in fsck root localmount hwclock loopback hostname sysctl modules; do
   _enable_svc "$s" boot
 done
