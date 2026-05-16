@@ -288,3 +288,40 @@ The next thing to check would be whether `/lib/modules/<kernel>/.../iwlmvm.ko` e
 | R6 | No Wi-Fi because full Intel op_mode stack not loaded; OpenRC user autostart enabled; udev chase errors | Force `cfg80211 mac80211 iwlwifi iwlmvm`; add `shimboot-wifi`; always `depmod`; add systemd-utils chase fallback; set `rc_autostart_user="NO"` | Build failed — stale cached rootfs used old patches. |
 | R7 | `llms.txt` described rewriting the chase patch for 260.1 | Rewrote `systemd-chase-statx-chromeos.patch` to target correct functions/lines | Patch in repo is correct but user's cached rootfs still had old version. |
 | R8 | Stale rootfs cache had old 2-hunk patch from R5/earlier; mountpoint patch had 100-line offset | Wipe stale patch dir; add stamp-based cache invalidation; regenerate mountpoint patch with correct line numbers | Expected: patches apply; build completes; Wi-Fi stack loads. |
+
+## R9: Fix NetworkManager unmanaged wlan0
+
+### Problem
+`nmcli device status` shows `wlan0 unmanaged` even after modules load and interface appears.
+Previous `99-shimboot.conf` used invalid `[device]` section (should be `[wifi]` or `[device-wifi]`).
+No explicit `managed=1` override for the interface.
+
+### Root cause
+NetworkManager keyfile plugin defaults to unmanaged for interfaces not explicitly claimed when certain sections are malformed or when OpenRC net services interfere.
+
+### Fix
+- Corrected NM config to use `[wifi]` + explicit `[device]` match for `wlan0` with `managed=1`.
+- Added the config write directly in `setup_rootfs_gentoo.sh` (was previously broken).
+- Recommended post-boot: stop competing services, `rfkill unblock`, `nmcli device set wlan0 managed yes`.
+
+### Files changed
+- `rootfs/opt/setup_rootfs_gentoo.sh` — rewrote 99-shimboot.conf block with correct sections.
+
+Rebuild with:
+```bash
+sudo rm -rf data/rootfs_dedede_gentoo
+sudo ./build_complete.sh dedede
+```
+
+After boot:
+```bash
+sudo rc-service net.wlan0 stop 2>/dev/null || true
+sudo rc-service dhcpcd stop || true
+sudo rc-service wpa_supplicant stop || true
+sudo rfkill unblock wifi
+sudo ip link set wlan0 up
+sudo nmcli device set wlan0 managed yes
+nmcli device status
+nmtui
+```
+

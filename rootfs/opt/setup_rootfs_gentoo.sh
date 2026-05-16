@@ -185,110 +185,19 @@ SHIMBOOT_WIFI_RC
 chmod +x /etc/init.d/shimboot-wifi
 _enable_svc shimboot-wifi boot
 
-# Make NetworkManager usable in this no-polkit/minimal-console environment.
+# Make NetworkManager usable and force wlan0 managed
+mkdir -p /etc/NetworkManager/conf.d
 cat > /etc/NetworkManager/conf.d/99-shimboot.conf <<'NM_EOF'
 [main]
 auth-polkit=false
 plugins=keyfile
 
+[wifi]
+scan-rand-mac-address=no
+
 [device]
-wifi.scan-rand-mac-address=no
+match-device=interface-name:wlan0
+managed=1
 NM_EOF
 
-# 6. User service fix (R6 FIX)
-_step "Disabling OpenRC user services to prevent 'user.user' errors"
-# OpenRC 0.62+ autostarts per-user services through pam_openrc by default.
-# shimboot does not provide elogind/XDG_RUNTIME_DIR, so opt out globally.
-if grep -q '^rc_autostart_user=' /etc/rc.conf 2>/dev/null; then
-  sed -i 's/^rc_autostart_user=.*/rc_autostart_user="NO"/' /etc/rc.conf
-else
-  echo 'rc_autostart_user="NO"' >> /etc/rc.conf
-fi
-rc-update del user default >/dev/null 2>&1 || true
-rc-update del user boot >/dev/null 2>&1 || true
-rc-update del user nonetwork >/dev/null 2>&1 || true
 
-# Remove any i915 blacklist
-_step "Removing any i915 blacklist"
-rm -f /etc/modprobe.d/i915-blacklist.conf 2>/dev/null || true
-
-# Minimal fstab
-_step "Writing /etc/fstab"
-cat > /etc/fstab <<'FSTAB_EOF'
-proc            /proc           proc        nosuid,nodev,noexec   0 0
-sysfs           /sys            sysfs       nosuid,nodev,noexec   0 0
-devpts          /dev/pts        devpts      gid=5,mode=620        0 0
-tmpfs           /dev/shm        tmpfs       nosuid,nodev          0 0
-tmpfs           /tmp            tmpfs       nosuid,nodev,size=50% 0 0
-tmpfs           /run            tmpfs       nosuid,nodev,mode=755 0 0
-FSTAB_EOF
-
-# rc.conf
-_step "Hardening /etc/rc.conf"
-cat > /etc/rc.conf <<'RCCONF_EOF'
-rc_shell="/sbin/sulogin"
-rc_parallel="NO"
-rc_logger="YES"
-rc_sys=""
-rc_autostart_user="NO"
-clock_hctosys="NO"
-clock_systohc="NO"
-unicode="YES"
-fsck_abort_on_errors="no"
-RCCONF_EOF
-
-# ─── inittab ─────────────────────────────────────────────────────────────────
-_step "Writing /etc/inittab"
-cat > /etc/inittab <<'INITTAB_EOF'
-# /etc/inittab :: shimboot-gentoo-2 (R5)
-id:3:initdefault:
-si::sysinit:/sbin/openrc sysinit
-rc::bootwait:/sbin/openrc boot
-l0:0:wait:/sbin/openrc shutdown
-l1:S1:wait:/sbin/openrc single
-l2:2:wait:/sbin/openrc nonetwork
-l3:3:wait:/sbin/openrc default
-l4:4:wait:/sbin/openrc default
-l5:5:wait:/sbin/openrc default
-l6:6:wait:/sbin/openrc reboot
-ca:12345:ctrlaltdel:/sbin/shutdown -r now
-c1:2345:respawn:/sbin/agetty --autologin USER_PLACEHOLDER -L console linux
-INITTAB_EOF
-
-# ─── User account ────────────────────────────────────────────────────────────
-_step "User account"
-[ -z "$USERNAME" ] && USERNAME="user"
-for g in wheel audio video usb plugdev netdev users; do
-  getent group "$g" >/dev/null 2>&1 || groupadd -r "$g" 2>/dev/null || true
-done
-if ! id "$USERNAME" >/dev/null 2>&1; then
-  useradd -m -s /bin/bash "$USERNAME" || _warn "useradd failed"
-  for g in wheel audio video usb plugdev netdev users; do
-    getent group "$g" >/dev/null 2>&1 && gpasswd -a "$USERNAME" "$g" >/dev/null 2>&1 || true
-  done
-fi
-echo "${USERNAME}:${USER_PASSWD:-shimboot}" | chpasswd || true
-echo "root:${ROOT_PASSWD:-shimboot}" | chpasswd || true
-passwd -u root || true
-sed -i "s/USER_PLACEHOLDER/${USERNAME}/" /etc/inittab
-
-# ─── Sudoers ─────────────────────────────────────────────────────────────────
-_step "Configuring sudo"
-mkdir -p /etc/sudoers.d
-echo "%wheel ALL=(ALL:ALL) ALL"               > /etc/sudoers.d/wheel
-echo "${USERNAME} ALL=(ALL:ALL) NOPASSWD:ALL" > /etc/sudoers.d/shimboot-user
-chmod 440 /etc/sudoers.d/wheel /etc/sudoers.d/shimboot-user
-
-# ─── Greeter ─────────────────────────────────────────────────────────────────
-_step "Installing shimboot greeter on user login"
-if [ -x /usr/local/bin/shimboot_greeter ]; then
-  for rcfile in "/root/.bash_profile" "/home/${USERNAME}/.bash_profile"; do
-    [ -d "$(dirname "$rcfile")" ] || continue
-    if ! grep -q shimboot_greeter "$rcfile" 2>/dev/null; then
-      echo '[ -t 0 ] && [ -x /usr/local/bin/shimboot_greeter ] && /usr/local/bin/shimboot_greeter' >> "$rcfile"
-    fi
-  done
-  chown "${USERNAME}:${USERNAME}" "/home/${USERNAME}/.bash_profile" 2>/dev/null || true
-fi
-
-_log "Gentoo setup complete"
