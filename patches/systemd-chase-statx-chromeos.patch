@@ -1,0 +1,141 @@
+diff --git a/src/basic/chase.c b/src/basic/chase.c
+index 82946ea..f4c6ece 100644
+--- a/src/basic/chase.c
++++ b/src/basic/chase.c
+@@ -108,6 +108,40 @@ static int log_prohibited_symlink(int fd, ChaseFlags flags) {
+                                  strna(n1));
+ }
+ 
++static int chase_xstatx(int fd, unsigned mask, struct statx *ret) {
++        int r;
++
++        r = xstatx_full(fd,
++                        /* path= */ NULL,
++                        /* statx_flags= */ 0,
++                        XSTATX_MNT_ID_BEST,
++                        mask,
++                        /* optional_mask= */ 0,
++                        /* mandatory_attributes= */ 0,
++                        ret);
++        if (r >= 0)
++                return r;
++
++        /* ChromeOS shim kernels / pivot_root mount trees can make statx() mount
++         * id probing fail (observed as EPROTO: "Protocol driver not attached")
++         * even for ordinary directories such as /etc/udev and /usr/lib/tmpfiles.d.
++         * udevadm and systemd-tmpfiles do not need mount IDs for common path
++         * canonicalization, so fall back to a plain statx() result. The few code
++         * paths that truly need mount comparison will later get -ENODATA from
++         * statx_mount_same() if no mount ID is available. */
++        if (!IN_SET(r, -EPROTO, -EUNATCH, -EINVAL, -ENOSYS, -EOPNOTSUPP))
++                return r;
++
++        return xstatx_full(fd,
++                        /* path= */ NULL,
++                        /* statx_flags= */ 0,
++                        /* xstatx_flags= */ 0,
++                        mask,
++                        /* optional_mask= */ 0,
++                        /* mandatory_attributes= */ 0,
++                        ret);
++}
++
+ static int openat_opath_with_automount(int dir_fd, const char *path, bool automount) {
+         static bool can_open_tree = true;
+         int r;
+@@ -263,14 +297,7 @@ int chaseat(int dir_fd, const char *path, ChaseFlags flags, char **ret_path, int
+                         if (fd < 0)
+                                 return -errno;
+ 
+-                        r = xstatx_full(fd,
+-                                        /* path= */ NULL,
+-                                        /* statx_flags= */ 0,
+-                                        XSTATX_MNT_ID_BEST,
+-                                        mask,
+-                                        /* optional_mask= */ 0,
+-                                        /* mandatory_attributes= */ 0,
+-                                        &stx);
++                        r = chase_xstatx(fd, mask, &stx);
+                         if (r < 0)
+                                 return r;
+ 
+@@ -323,14 +350,7 @@ int chaseat(int dir_fd, const char *path, ChaseFlags flags, char **ret_path, int
+         if (fd < 0)
+                 return -errno;
+ 
+-        r = xstatx_full(fd,
+-                        /* path= */ NULL,
+-                        /* statx_flags= */ 0,
+-                        XSTATX_MNT_ID_BEST,
+-                        mask,
+-                        /* optional_mask= */ 0,
+-                        /* mandatory_attributes= */ 0,
+-                        &stx);
++        r = chase_xstatx(fd, mask, &stx);
+         if (r < 0)
+                 return r;
+         root_stx = stx; /* remember stat data of the root, so that we can recognize it later */
+@@ -413,14 +433,7 @@ int chaseat(int dir_fd, const char *path, ChaseFlags flags, char **ret_path, int
+                         if (fd_parent < 0)
+                                 return -errno;
+ 
+-                        r = xstatx_full(fd_parent,
+-                                        /* path= */ NULL,
+-                                        /* statx_flags= */ 0,
+-                                        XSTATX_MNT_ID_BEST,
+-                                        mask,
+-                                        /* optional_mask= */ 0,
+-                                        /* mandatory_attributes= */ 0,
+-                                        &stx_parent);
++                        r = chase_xstatx(fd_parent, mask, &stx_parent);
+                         if (r < 0)
+                                 return r;
+ 
+@@ -486,14 +499,7 @@ int chaseat(int dir_fd, const char *path, ChaseFlags flags, char **ret_path, int
+                                 if (fd_grandparent < 0)
+                                         return -errno;
+ 
+-                                r = xstatx_full(fd_grandparent,
+-                                                /* path= */ NULL,
+-                                                /* statx_flags= */ 0,
+-                                                XSTATX_MNT_ID_BEST,
+-                                                mask,
+-                                                /* optional_mask= */ 0,
+-                                                /* mandatory_attributes= */ 0,
+-                                                &stx_grandparent);
++                                r = chase_xstatx(fd_grandparent, mask, &stx_grandparent);
+                                 if (r < 0)
+                                         return r;
+ 
+@@ -547,14 +553,7 @@ int chaseat(int dir_fd, const char *path, ChaseFlags flags, char **ret_path, int
+                 }
+ 
+                 /* ... and then check what it actually is. */
+-                r = xstatx_full(child,
+-                                /* path= */ NULL,
+-                                /* statx_flags= */ 0,
+-                                XSTATX_MNT_ID_BEST,
+-                                mask,
+-                                /* optional_mask= */ 0,
+-                                /* mandatory_attributes= */ 0,
+-                                &stx_child);
++                r = chase_xstatx(child, mask, &stx_child);
+                 if (r < 0)
+                         return r;
+ 
+@@ -592,14 +591,7 @@ int chaseat(int dir_fd, const char *path, ChaseFlags flags, char **ret_path, int
+                                 if (fd < 0)
+                                         return fd;
+ 
+-                                r = xstatx_full(fd,
+-                                                /* path= */ NULL,
+-                                                /* statx_flags= */ 0,
+-                                                XSTATX_MNT_ID_BEST,
+-                                                mask,
+-                                                /* optional_mask= */ 0,
+-                                                /* mandatory_attributes= */ 0,
+-                                                &stx);
++                                r = chase_xstatx(fd, mask, &stx);
+                                 if (r < 0)
+                                         return r;
+ 

@@ -1,0 +1,73 @@
+#!/bin/bash
+
+# shimboot_greeter - Welcome message for shimboot-gentoo-2
+# Shown on first login
+
+# ─── Detect shimboot version ─────────────────────────────────────────────────
+shimboot_version=""
+if [ -f "/bootloader/opt/.shimboot_version" ]; then
+  shimboot_version="$(cat /bootloader/opt/.shimboot_version)"
+  if [ -f "/bootloader/opt/.shimboot_version_dev" ]; then
+    shimboot_version+=" (dev-$(cat /bootloader/opt/.shimboot_version_dev))"
+  fi
+fi
+
+# ─── Detect distro ───────────────────────────────────────────────────────────
+distro="Unknown"
+if [ -f /etc/gentoo-release ]; then
+  distro="Gentoo Linux $(cat /etc/gentoo-release | grep -oP '\d+\.\d+' | head -1)"
+elif [ -f /etc/alpine-release ]; then
+  distro="Alpine Linux $(cat /etc/alpine-release)"
+elif [ -f /etc/os-release ]; then
+  distro="$(. /etc/os-release && echo "$PRETTY_NAME")"
+fi
+
+# ─── Storage stats ────────────────────────────────────────────────────────────
+percent_full="$(df -BM / | tail -n1 | awk '{print $5}' | tr -d '%')"
+used="$(df -h / | tail -n1 | awk '{print $3}')"
+total_size_mb="$(df -BM / | tail -n1 | awk '{print $2}' | tr -d 'M')"
+total_h="$(df -h / | tail -n1 | awk '{print $2}')"
+avail_h="$(df -h / | tail -n1 | awk '{print $4}')"
+
+# ─── Memory stats ─────────────────────────────────────────────────────────────
+mem_total="$(free -h | awk '/^Mem:/{print $2}')"
+mem_used="$(free -h | awk '/^Mem:/{print $3}')"
+swap_total="$(free -h | awk '/^Swap:/{print $2}')"
+
+# ─── Print greeter ───────────────────────────────────────────────────────────
+echo ""
+echo "  ╔═══════════════════════════════════════════════════════╗"
+if [ "$shimboot_version" ]; then
+  printf "  ║  shimboot-gentoo-2 :: %-32s║\n" "$shimboot_version"
+else
+  echo "  ║  shimboot-gentoo-2                                    ║"
+fi
+printf "  ║  %-53s║\n" "$distro"
+echo "  ╠═══════════════════════════════════════════════════════╣"
+printf "  ║  Disk: %-10s used / %-10s total (%-3s%%)    ║\n" "$used" "$total_h" "$percent_full"
+printf "  ║  Free: %-10s available                            ║\n" "$avail_h"
+printf "  ║  RAM:  %-10s used / %-10s total           ║\n" "$mem_used" "$mem_total"
+printf "  ║  Swap: %-10s (zram)                              ║\n" "$swap_total"
+echo "  ╠═══════════════════════════════════════════════════════╣"
+echo "  ║  GitHub: https://github.com/foxdefox-wq/shimboot-    ║"
+echo "  ║           gentoo-2                                    ║"
+echo "  ║  Upstream: https://github.com/ading2210/shimboot     ║"
+echo "  ╚═══════════════════════════════════════════════════════╝"
+echo ""
+
+# ─── Rootfs expansion warning ────────────────────────────────────────────────
+if [ "$percent_full" -gt 80 ] && [ "$total_size_mb" -lt 7000 ]; then
+  echo "  ⚠  WARNING: Disk is ${percent_full}% full and rootfs has NOT been expanded!"
+  echo "     Run: sudo expand_rootfs"
+  echo ""
+fi
+
+# ─── First-boot hint ─────────────────────────────────────────────────────────
+if [ -f /etc/shimboot-firstboot ]; then
+  echo "  ℹ  First boot detected. Tips:"
+  echo "     - Expand rootfs: sudo expand_rootfs"
+  echo "     - Update system: sudo emerge -uDN @world  (Gentoo)"
+  echo "                   or: sudo apk upgrade          (Alpine)"
+  echo ""
+  rm -f /etc/shimboot-firstboot
+fi

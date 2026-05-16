@@ -1,0 +1,242 @@
+# shimboot-gentoo-2 :: LLM handoff
+
+Last updated: 2026-05-15 (R7 — systemd-utils 260.1 patch refresh)
+Target hardware/log: dedede / ChromeOS shim kernel `5.4.85-22138-ga9994f5cad40` / Gentoo OpenRC + sysvinit
+
+---
+
+
+## R7 build fix
+
+A rebuild failed in `sys-apps/systemd-utils-260.1-r1` during Portage `src_prepare` because the R6 user patch `patches/systemd-chase-statx-chromeos.patch` no longer matched systemd 260.1's `src/basic/chase.c`:
+
+```text
+Applying systemd-chase-statx-chromeos.patch ...
+Hunk #1 FAILED at 40.
+Hunk #2 FAILED at 48.
+```
+
+Root cause: the R6 patch was written against a `chase.c` layout that had a small `chase_statx()` helper near the top of the file. In systemd 260.1, `chaseat()` contains direct `xstatx_full(..., XSTATX_MNT_ID_BEST, ...)` calls instead, so the old hunks cannot apply.
+
+R7 rewrites `patches/systemd-chase-statx-chromeos.patch` for systemd 260.1:
+
+- adds a new local helper `chase_xstatx(int fd, unsigned mask, struct statx *ret)`;
+- first tries the original `xstatx_full(..., XSTATX_MNT_ID_BEST, ...)` behavior;
+- on ChromeOS shim/pivot-root related failures (`EPROTO`, `EUNATCH`, `EINVAL`, `ENOSYS`, `EOPNOTSUPP`), retries without mount-ID probing;
+- replaces all six mount-ID-probing `xstatx_full()` calls in `chaseat()` with `chase_xstatx()`.
+
+Validation performed for R7:
+
+```bash
+patch -p1 -f -g0 --no-backup-if-mismatch < patches/systemd-chase-statx-chromeos.patch
+patch -p1 -f -g0 --no-backup-if-mismatch < patches/systemd-mountpoint-util-chromeos.patch
+```
+
+against a clean systemd `v260.1` tree. Both patches apply; the mountpoint patch applies with the expected line offset.
+
+Note: the `/usr/src/linux` kernel-source warning in the build log is not the fatal error here. The fatal error is solely the stale user patch rejection.
+
+---
+
+## Current field log summary
+
+Boot reached a working console/login. Remaining issues from the supplied boot log:
+
+1. `ip link` only showed `lo`; no Wi-Fi netdev.
+2. `NetworkManager` was running but OpenRC marked it `inactive` because there was no usable network device/connection yet.
+3. `udev-trigger` failed with `Protocol driver not attached` while `udevd`/`udevadm` tried to chase `/etc/udev`, `/usr/lib/udev`, `/etc/tmpfiles.d`, etc.
+4. Manual module loading only inserted `cfg80211` and `iwlwifi`; `lsmod` did **not** show `mac80211` or `iwlmvm`.
+5. `user.user failed to start` appeared after auto-login.
+
+Important correction to the previous R5 theory: `/run` is already a tmpfs and `localmount` is started. `iwlwifi` is also already loading firmware. The missing piece for Intel Wi-Fi is the op_mode stack, especially `iwlmvm`.
+
+---
+
+## Root causes
+
+### A. Intel Wi-Fi stack was incomplete
+
+For dedede/Jasper Lake systems with Intel CNVi/AX201-class Wi-Fi, `iwlwifi` is only the PCI/transport driver. The `iwlmvm` op_mode plus `mac80211` are needed before the kernel creates a `wlan*`/`wlp*` interface. The log showed:
+
+```text
+loaded firmware version ... op_mode iwlmvm
+lsmod: iwlwifi, cfg80211 only
+ip link: lo only
+```
+
+That combination strongly indicates `iwlmvm` never loaded (or was not indexed/available), so no wireless interface was registered.
+
+### B. udev coldplug is still unreliable under shimboot's mount topology
+
+`udevadm trigger`/`systemd-tmpfiles` from Gentoo's `sys-apps/systemd-utils` can hit `Protocol driver not attached` while resolving/chasing paths on the ChromeOS shim/pivot_root mount tree. Similar systemd chase/mount-id problems are known when the mount table has pathological/overmounted root relationships. R6 therefore does **not** rely on udev coldplug for Wi-Fi; it force-loads the needed module stack before NetworkManager.
+
+### C. OpenRC user services are autostarting through PAM
+
+OpenRC 0.62+ enables user services through `pam_openrc` by default. In this minimal shimboot image there is no elogind/XDG_RUNTIME_DIR setup, so the PAM auto-start path leaves a failing `user.user` dynamic service. Removing a `user` service from runlevels is insufficient; the global opt-out is:
+
+```bash
+rc_autostart_user="NO"
+```
+
+---
+
+## R6 fixes implemented
+
+### 1. Force full Intel Wi-Fi stack
+
+File: `rootfs/opt/setup_rootfs_gentoo.sh`
+
+Writes `/etc/conf.d/modules` as:
+
+```bash
+modules="cfg80211 mac80211 iwlwifi iwlmvm"
+module_iwlwifi_args="enable_ini=1"
+```
+
+Also writes `/etc/modprobe.d/99-shimboot-wifi.conf`:
+
+```bash
+options iwlwifi enable_ini=1
+```
+
+### 2. Add `shimboot-wifi` OpenRC service
+
+File: `rootfs/opt/setup_rootfs_gentoo.sh`
+
+Creates `/etc/init.d/shimboot-wifi` and enables it in the `boot` runlevel, before NetworkManager:
+
+```bash
+modprobe cfg80211 || true
+modprobe mac80211 || true
+modprobe iwlwifi enable_ini=1 || modprobe iwlwifi || true
+modprobe iwlmvm || true
+```
+
+This makes Wi-Fi independent of `udev-trigger` success.
+
+### 3. Regenerate module indexes every build
+
+File: `patch_rootfs.sh`
+
+R5 only ran `depmod` when `.ko.gz` files were decompressed. R6 runs `depmod -b <rootfs> <kernel>` for every copied `/lib/modules/<kernel>` tree, compressed or not. This ensures `modprobe iwlmvm` and module aliases/dependencies are valid after copying ChromeOS shim/recovery modules.
+
+`patch_rootfs.sh` also re-applies `99-shimboot-wifi.conf` after copying recovery modprobe snippets, so recovery config cannot accidentally override the shimboot Wi-Fi option.
+
+### 4. Patch systemd-utils chase fallback
+
+Files:
+
+- `patches/systemd-mountpoint-util-chromeos.patch` (existing)
+- `patches/systemd-chase-statx-chromeos.patch` (new)
+- `build_rootfs_gentoo.sh`
+
+`build_rootfs_gentoo.sh` now installs all `patches/systemd-*.patch` into Portage's `sys-apps/systemd-utils` patch directory.
+
+The new chase patch makes `chase_statx()` retry without mount-id probing if the ChromeOS shim kernel/mount tree returns errors such as `EPROTO` (`Protocol driver not attached`). This is intended to reduce `udevadm`/`systemd-tmpfiles` noise and may allow `udev-trigger` to work, but Wi-Fi no longer depends on it.
+
+### 5. Disable OpenRC user-service autostart correctly
+
+File: `rootfs/opt/setup_rootfs_gentoo.sh`
+
+Adds to `/etc/rc.conf`:
+
+```bash
+rc_autostart_user="NO"
+```
+
+Still removes `user` from common runlevels as a safety measure.
+
+### 6. Improve NetworkManager console usability
+
+File: `rootfs/opt/setup_rootfs_gentoo.sh`
+
+Writes `/etc/NetworkManager/conf.d/99-shimboot.conf`:
+
+```ini
+[main]
+auth-polkit=false
+plugins=keyfile
+
+[device]
+wifi.scan-rand-mac-address=no
+```
+
+### 7. Expanded diagnostics
+
+File: `rootfs/usr/local/bin/shimboot_bootdiag`
+
+Now logs:
+
+- `/sys/class/net`
+- `nmcli general/radio/device`
+- rfkill/iw if installed
+- iwl/mac80211/cfg80211 module files and `modinfo`
+- relevant `modules.dep`/`modules.alias` snippets
+- `/etc/conf.d/modules`
+- modprobe configs mentioning Wi-Fi/blacklist
+- findmnt mount IDs/parents for root/mount-topology debugging
+- `udev-trigger` status
+
+---
+
+## Files changed in R6
+
+| File | Change |
+|------|--------|
+| `rootfs/opt/setup_rootfs_gentoo.sh` | Force full Wi-Fi stack; add `shimboot-wifi`; disable OpenRC user autostart; configure NetworkManager; guard greeter on interactive TTY. |
+| `patch_rootfs.sh` | Always run `depmod`; re-apply Wi-Fi modprobe override after copying recovery config. |
+| `patches/systemd-chase-statx-chromeos.patch` | New systemd-utils patch: fallback when statx mount-id probing fails with shimboot mount topology. |
+| `build_rootfs_gentoo.sh` | Install all `patches/systemd-*.patch` into Portage patch dir. |
+| `rootfs/usr/local/bin/shimboot_bootdiag` | Expanded Wi-Fi/module/udev/mount diagnostics. |
+| `llms.txt` | Updated with R6 findings and instructions. |
+
+---
+
+## Expected result after rebuilding image
+
+After booting the rebuilt image:
+
+```bash
+ip link
+lsmod | grep -E 'iwl|mac80211|cfg80211'
+```
+
+Expected modules include at least:
+
+```text
+cfg80211
+mac80211
+iwlwifi
+iwlmvm
+```
+
+Expected interface: a `wlan0`/`wlp*` link in addition to `lo`.
+
+Connect with:
+
+```bash
+nmtui
+# or:
+nmcli dev wifi list
+nmcli dev wifi connect 'SSID' password 'PASSWORD'
+```
+
+If Wi-Fi still does not appear, run:
+
+```bash
+sudo /usr/local/bin/shimboot_bootdiag
+cat /var/log/shimboot-boot.log
+```
+
+The next thing to check would be whether `/lib/modules/<kernel>/.../iwlmvm.ko` exists and whether `modinfo iwlmvm` succeeds.
+
+---
+
+## History of attempts
+
+| Build | Problem found | Fix attempted | Result |
+|-------|---------------|---------------|--------|
+| R1-R3 | Blank screen | Various inittab/agetty fixes | Unsuccessful until display diagnostics. |
+| R4 | No fbdev on shim 5.4 | Keep frecon; use console pty | Login prompt visible. |
+| R5 | Missing Wi-Fi guessed as stubbed udev/localmount | Un-stub udev-trigger/localmount; load only `iwlwifi`; disable runlevel `user` | Incomplete: `/run` was fine; `iwlwifi` loaded but no `iwlmvm`; `user.user` persisted. |
+| R6 | No Wi-Fi because full Intel op_mode stack not loaded; OpenRC user autostart enabled; udev chase errors | Force `cfg80211 mac80211 iwlwifi iwlmvm`; add `shimboot-wifi`; always `depmod`; add systemd-utils chase fallback; set `rc_autostart_user="NO"` | Expected: Wi-Fi interface appears and `user.user` noise stops. |

@@ -1,0 +1,137 @@
+#!/bin/bash
+#
+# kill_frecon — release the framebuffer owned by frecon-lite.
+#
+# IMPORTANT (2026-05-16 R4 finding):
+# The dedede shim 5.4 kernel uses i915 in PURE DRM mode.
+# There is NO fbdev emulation, NO /dev/fb0, NO fbcon vtcon entry.
+# The only vtconsole is "(S) dummy device" — a software console with no
+# hardware renderer.
+#
+# Consequence: killing frecon-lite at BOOT TIME leaves the screen completely
+# dark, because frecon is the ONLY process that can render pixels to the
+# panel. The kernel VTs (tty1..6) have no backing framebuffer, so agetty on
+# tty1 runs invisibly.
+#
+# This script is therefore NOT called during the boot runlevel.
+# It is only intended to be called from an X11/Wayland session startup
+# (e.g. startx, a display manager pre-exec hook) when the GPU DRM master
+# is being handed off to Xorg/Wayland.
+#
+# If called during boot (legacy / recovery path), it will:
+#  1. Try to detect whether fbcon is available.
+#  2. If fbcon IS available: proceed with the classic teardown.
+#  3. If fbcon is NOT available (the common dedede case): refuse to kill
+#     frecon and print a warning — the caller should not kill frecon.
+#
+# Usage: kill_frecon [--force]
+#   --force   Kill frecon even without a working framebuffer console.
+#             Only use this from an X11 startup that will immediately
+#             take over the DRM master.
+
+FORCE=0
+for arg in "$@"; do
+  [ "$arg" = "--force" ] && FORCE=1
+done
+
+LOG=/var/log/shimboot-kill-frecon.log
+mkdir -p /var/log
+: > "$LOG" 2>/dev/null || true
+
+_log() {
+  printf '[kill_frecon %s] %s\n' "$(date +%H:%M:%S 2>/dev/null)" "$*" \
+    | tee -a "$LOG" 2>/dev/null
+}
+
+_log "kill_frecon called (force=$FORCE)"
+_log "kernel: $(uname -r 2>/dev/null)"
+
+# ── Safety check: does a real framebuffer console exist? ──────────────────────
+has_fbcon=0
+for d in /sys/class/vtconsole/vtcon*; do
+  [ -f "$d/name" ] || continue
+  name="$(cat "$d/name" 2>/dev/null)"
+  case "$name" in
+    *frame\ buffer*|*framebuffer*)
+      has_fbcon=1
+      _log "fbcon vtconsole found: $d ($name)"
+      ;;
+  esac
+done
+
+if [ -e /dev/fb0 ]; then
+  has_fbcon=1
+  _log "framebuffer device /dev/fb0 exists"
+fi
+
+if [ "$has_fbcon" = 0 ] && [ "$FORCE" = 0 ]; then
+  _log "WARNING: no framebuffer console detected."
+  _log "  vtconsole/vtcon0 name = $(cat /sys/class/vtconsole/vtcon0/name 2>/dev/null)"
+  _log "  Killing frecon without fbcon will make the screen go dark forever."
+  _log "  Refusing to kill frecon. Pass --force to override."
+  _log "  (This is normal on dedede / shim 5.4 kernels without fbdev emulation.)"
+  exit 1
+fi
+
+if [ "$has_fbcon" = 0 ] && [ "$FORCE" = 1 ]; then
+  _log "WARNING: no framebuffer console, but --force passed. Proceeding anyway."
+  _log "  Caller must immediately take over DRM master (Xorg/Wayland)."
+fi
+
+# ── Phase 1: chvt 1 before killing frecon ────────────────────────────────────
+_log "Phase 1: chvt 1"
+chvt 1 2>>"$LOG" && _log "chvt 1: OK" || _log "chvt 1: FAILED (non-fatal)"
+
+# ── Phase 2: drop /dev/console bind mount ────────────────────────────────────
+_log "Phase 2: drop /dev/console bind mount"
+if mountpoint -q /dev/console 2>/dev/null; then
+  umount -l /dev/console 2>>"$LOG" \
+    && _log "/dev/console: lazy-unmounted" \
+    || _log "/dev/console: umount failed"
+else
+  _log "/dev/console: not a mountpoint (fine)"
+fi
+
+# ── Phase 3: SIGTERM frecon-lite ─────────────────────────────────────────────
+_log "Phase 3: SIGTERM frecon-lite"
+if pgrep -x frecon-lite >/dev/null 2>&1; then
+  pkill -TERM frecon-lite 2>>"$LOG"
+  _log "frecon-lite: SIGTERM sent"
+  for _ in 1 2 3 4 5; do
+    pgrep -x frecon-lite >/dev/null 2>&1 || break
+    sleep 0.2
+  done
+  if pgrep -x frecon-lite >/dev/null 2>&1; then
+    pkill -KILL frecon-lite 2>>"$LOG"
+    _log "frecon-lite: SIGKILL sent"
+    sleep 0.3
+  fi
+  pgrep -x frecon-lite >/dev/null 2>&1 \
+    && _log "frecon-lite: STILL ALIVE (problem!)" \
+    || _log "frecon-lite: gone"
+else
+  _log "frecon-lite: was not running"
+fi
+
+# ── Phase 4: rebind fbcon ────────────────────────────────────────────────────
+if [ "$has_fbcon" = 1 ]; then
+  _log "Phase 4: rebind fbcon"
+  for d in /sys/class/vtconsole/vtcon*; do
+    [ -f "$d/name" ] || continue
+    name="$(cat "$d/name" 2>/dev/null)"
+    case "$name" in
+      *frame\ buffer*|*framebuffer*)
+        echo 1 > "$d/bind" 2>>"$LOG" \
+          && _log "  $d: rebound" \
+          || _log "  $d: rebind FAILED"
+        ;;
+    esac
+  done
+fi
+
+# ── Phase 5: chvt 1 again ───────────────────────────────────────────────────
+_log "Phase 5: chvt 1 (again)"
+chvt 1 2>>"$LOG" && _log "chvt 1: OK" || _log "chvt 1: FAILED"
+
+_log "kill_frecon done. Log: $LOG"
+exit 0

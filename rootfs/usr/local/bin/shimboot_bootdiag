@@ -1,0 +1,102 @@
+#!/bin/bash
+#
+# shimboot_bootdiag — late-boot diagnostic dumper.
+# Manual run: sudo shimboot_bootdiag
+
+LOG=/var/log/shimboot-boot.log
+mkdir -p /var/log
+touch "$LOG" 2>/dev/null || true
+
+{
+  printf '\n#######################################################\n'
+  printf '## shimboot_bootdiag :: %s\n' "$(date -Iseconds 2>/dev/null || date)"
+  printf '#######################################################\n\n'
+
+  printf '\n=== System Info ===\n'
+  uname -a 2>&1 || true
+  cat /etc/gentoo-release 2>/dev/null || true
+
+  printf '\n=== runlevel ===\n'
+  /sbin/runlevel 2>&1 || true
+
+  printf '\n=== rc-status --all ===\n'
+  rc-status --all 2>&1 || true
+
+  printf '\n=== ip link ===\n'
+  ip link 2>&1 || true
+
+  printf '\n=== /sys/class/net ===\n'
+  ls -la /sys/class/net 2>&1 || true
+  for n in /sys/class/net/*; do
+    [ -e "$n" ] || continue
+    printf '%s -> ' "$n"
+    readlink -f "$n" 2>&1 || true
+  done
+
+  printf '\n=== NetworkManager Status ===\n'
+  rc-service NetworkManager status 2>&1 || true
+  nmcli general 2>&1 || true
+  nmcli radio 2>&1 || true
+  nmcli device 2>&1 || true
+
+  printf '\n=== WiFi/RFKill tools ===\n'
+  command -v rfkill >/dev/null 2>&1 && rfkill list 2>&1 || echo "rfkill not installed"
+  command -v iw >/dev/null 2>&1 && iw dev 2>&1 || echo "iw not installed"
+
+  printf '\n=== dmesg (WiFi/Modules) ===\n'
+  dmesg | grep -iE 'iwl|iwlmvm|iwlwifi|wifi|wlan|firmware|80211|cfg80211|mac80211|rfkill|LoadPin|module' | tail -n 150 || true
+
+  printf '\n=== Loaded Modules ===\n'
+  lsmod 2>&1 || true
+
+  printf '\n=== iwl module files ===\n'
+  find /lib/modules -iname '*iwl*' -o -iname '*mac80211*' -o -iname '*cfg80211*' 2>&1 | sort || true
+
+  printf '\n=== modinfo iwl stack ===\n'
+  for m in cfg80211 mac80211 iwlwifi iwlmvm iwldvm; do
+    printf '\n--- modinfo %s ---\n' "$m"
+    modinfo "$m" 2>&1 | sed -n '1,80p' || true
+  done
+
+  printf '\n=== module dependency snippets ===\n'
+  for f in /lib/modules/*/modules.dep /lib/modules/*/modules.alias; do
+    [ -f "$f" ] || continue
+    printf '\n--- %s ---\n' "$f"
+    grep -iE 'iwlwifi|iwlmvm|iwldvm|mac80211|cfg80211|8086.*(02f0|06f0|a0f0|43f0|4df0|51f0)' "$f" | tail -n 80 || true
+  done
+
+  printf '\n=== /etc/conf.d/modules ===\n'
+  cat /etc/conf.d/modules 2>&1 || true
+
+  printf '\n=== modprobe configs mentioning iwl/wifi ===\n'
+  grep -RInEi 'iwl|wifi|80211|cfg80211|mac80211|blacklist' /etc/modprobe.d /lib/modprobe.d 2>&1 || true
+
+  printf '\n=== /run and /tmp Mounts ===\n'
+  mount | grep -E '/run|/tmp| /sys | /proc | /dev ' 2>&1 || true
+  ls -la /run 2>&1 || true
+
+  printf '\n=== mountinfo anomalies ===\n'
+  command -v findmnt >/dev/null 2>&1 && findmnt -R -o ID,PARENT,TARGET,SOURCE,FSTYPE,PROPAGATION / 2>&1 | sed -n '1,120p' || true
+
+  printf '\n=== udev Status ===\n'
+  rc-service udev status 2>&1 || true
+  rc-service udev-trigger status 2>&1 || true
+  pgrep -af udev 2>&1 || true
+  udevadm info --version 2>&1 || true
+
+  printf '\n=== dbus Status ===\n'
+  rc-service dbus status 2>&1 || true
+  pgrep -af dbus 2>&1 || true
+
+  printf '\n=== active VT and Display ===\n'
+  [ -f /sys/class/tty/tty0/active ] && cat /sys/class/tty/tty0/active || echo "no tty0/active"
+  ls -la /dev/fb* 2>&1 || echo "no /dev/fb*"
+  pgrep -af frecon 2>&1 || echo "no frecon"
+
+  printf '\n#######################################################\n'
+  printf '## end shimboot_bootdiag\n'
+  printf '#######################################################\n\n'
+} >> "$LOG" 2>&1
+
+printf '[shimboot_bootdiag] done — see %s\n' "$LOG"
+exit 0

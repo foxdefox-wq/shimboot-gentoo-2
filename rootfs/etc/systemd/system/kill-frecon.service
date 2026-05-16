@@ -1,0 +1,15 @@
+[Unit]
+Description=Kill frecon-lite to allow Xorg/Wayland to start
+Documentation=https://github.com/foxdefox-wq/shimboot-gentoo-2
+After=sysinit.target
+Before=graphical.target display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kill_frecon
+RemainAfterExit=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical.target

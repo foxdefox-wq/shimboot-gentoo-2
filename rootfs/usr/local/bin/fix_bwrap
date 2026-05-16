@@ -1,0 +1,54 @@
+#!/bin/bash
+
+# fix_bwrap - Fix bwrap suid permissions (required for Flatpak/Steam)
+# shimboot-gentoo-2
+
+set -e
+
+_log() { printf '[fix_bwrap] %s\n' "$*"; }
+_warn() { printf '[fix_bwrap] WARN: %s\n' "$*" >&2; }
+
+if [ ! "$HOME_DIR" ]; then
+  _log "Re-running with sudo to set HOME_DIR=$HOME"
+  sudo HOME_DIR="$HOME" "$0"
+  exit 0
+fi
+
+fix_perms() {
+  local target_file="$1"
+  _log "Setting suid root on: $target_file"
+  chown root:root "$target_file"
+  chmod u+s "$target_file"
+  ls -la "$target_file"
+}
+
+if [ ! -f "/usr/bin/bwrap" ]; then
+  _warn "/usr/bin/bwrap not found. Is bubblewrap installed?"
+  exit 1
+fi
+
+_log "Fixing permissions for /usr/bin/bwrap"
+fix_perms /usr/bin/bwrap
+
+if [ ! -d "$HOME_DIR/.steam/" ]; then
+  _log "Steam not found at $HOME_DIR/.steam/ - skipping Steam bwrap fix."
+  _log "Done."
+  exit 0
+fi
+
+_log "Fixing bwrap binaries inside Steam..."
+steam_bwraps="$(find "$HOME_DIR/.steam/" -name 'srt-bwrap' 2>/dev/null)"
+if [ -z "$steam_bwraps" ]; then
+  _warn "No srt-bwrap found in $HOME_DIR/.steam/"
+  _log "Done."
+  exit 0
+fi
+
+for bwrap_bin in $steam_bwraps; do
+  _log "  Patching: $bwrap_bin"
+  cp /usr/bin/bwrap "$bwrap_bin"
+  fix_perms "$bwrap_bin"
+done
+
+_log "All bwrap binaries fixed."
+_log "Done."
