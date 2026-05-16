@@ -99,12 +99,6 @@ _install_stub_service root         ''      "Bypassing root remount on shimboot"
 _install_stub_service hwclock      clock   "Bypassing hardware clock access on shimboot"
 _install_stub_service swclock      clock   "Bypassing software clock restore on shimboot"
 
-# R5 FIX: We NO LONGER stub localmount or udev-trigger.
-# localmount is needed to mount /run and /tmp as tmpfs from /etc/fstab.
-# udev-trigger is CRITICAL for hardware detection (Wi-Fi, etc).
-# The previous "cannot speak to running shim udevd" error was likely due to
-# /run not being writable (no tmpfs) or a version mismatch that we must solve.
-
 # 2. kill-frecon service
 _step "Installing kill-frecon service (NOT auto-enabled)"
 cat > /etc/init.d/kill-frecon <<'KILL_FRECON_RC'
@@ -242,3 +236,19 @@ scan-rand-mac-address=no
 match-device=interface-name:wlan0
 managed=1
 NM_EOF
+
+# ─── CRITICAL FIX: Enable agetty on tty2/tty3/tty4 (NOT tty1) ───────────────
+# tty1 is bound to frecon-lite's pseudo-TTY via the shim's /dev/console bind-mount.
+# Starting agetty on tty1 causes kernel panics or ChromeOS verified-boot watchdog
+# reboots. We therefore enable getty only on tty2, tty3, and tty4.
+_step "Enabling agetty login services (tty2/tty3/tty4)"
+for tty in tty2 tty3 tty4; do
+  if [ -e "/etc/init.d/agetty" ]; then
+    # Gentoo provides a single agetty init script that takes a TTY argument
+    ln -sf /etc/init.d/agetty "/etc/init.d/agetty.$tty" 2>/dev/null || true
+    _enable_svc "agetty.$tty" default
+  else
+    _warn "agetty init script not found — skipping $tty"
+  fi
+done
+_log "  agetty enabled on tty2/tty3/tty4 (tty1 deliberately skipped)"
