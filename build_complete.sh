@@ -311,12 +311,24 @@ fi
 
 # ─── Build or reuse rootfs ────────────────────────────────────────────────────
 
-# Compute a stamp of the current repo's systemd-utils patches so we can detect
-# stale patches in a cached rootfs and force a rebuild automatically.
-current_patch_stamp=""
-if ls patches/systemd-*.patch >/dev/null 2>&1; then
-  current_patch_stamp="$(sha256sum patches/systemd-*.patch 2>/dev/null | sha256sum | cut -d' ' -f1)"
-fi
+compute_rootfs_stamp() {
+  (
+    [ -f build_rootfs.sh ] && sha256sum build_rootfs.sh
+    [ -f build_rootfs_gentoo.sh ] && sha256sum build_rootfs_gentoo.sh
+    if [ -d rootfs ]; then
+      find rootfs -type f -print0 | sort -z | xargs -0 sha256sum
+    fi
+    if ls patches/systemd-*.patch >/dev/null 2>&1; then
+      sha256sum patches/systemd-*.patch 2>/dev/null
+    fi
+  ) | sha256sum | cut -d' ' -f1
+}
+
+# Stamp the effective rootfs/bootstrap inputs so cached rootfs directories are
+# rebuilt automatically whenever we change the overlay, in-chroot setup logic,
+# or ChromeOS-specific systemd-utils patches.
+current_rootfs_stamp="$(compute_rootfs_stamp)"
+rootfs_stamp_relpath="etc/.shimboot-rootfs-stamp"
 
 if [ "$existing_rootfs_dir" ]; then
   print_title "Using pre-built rootfs: $existing_rootfs_dir"
@@ -327,14 +339,14 @@ else
   needs_rebuild=false
   if [ ! -d "$rootfs_dir" ] || [ -z "$(ls -A "$rootfs_dir" 2>/dev/null)" ]; then
     needs_rebuild=true
-  elif [ -n "$current_patch_stamp" ]; then
-    cached_stamp=""
-    stamp_file="$rootfs_dir/etc/portage/patches/sys-apps/systemd-utils/.shimboot-patch-stamp"
-    [ -f "$stamp_file" ] && cached_stamp="$(cat "$stamp_file")"
-    if [ "$cached_stamp" != "$current_patch_stamp" ]; then
-      print_warn "Detected stale systemd-utils patches in cached rootfs!"
-      print_warn "Cached stamp : ${cached_stamp:-<none>}"
-      print_warn "Current stamp: $current_patch_stamp"
+  else
+    cached_rootfs_stamp=""
+    stamp_file="$rootfs_dir/$rootfs_stamp_relpath"
+    [ -f "$stamp_file" ] && cached_rootfs_stamp="$(cat "$stamp_file")"
+    if [ "$cached_rootfs_stamp" != "$current_rootfs_stamp" ]; then
+      print_warn "Detected stale cached rootfs (repo rootfs/setup content changed)!"
+      print_warn "Cached stamp : ${cached_rootfs_stamp:-<none>}"
+      print_warn "Current stamp: $current_rootfs_stamp"
       print_warn "Deleting stale rootfs to force a clean rebuild."
       rm -rf "$rootfs_dir"
       mkdir -p "$rootfs_dir"
@@ -362,6 +374,10 @@ else
   fi
 fi
 
+# Persist the current rootfs stamp so future runs can detect overlay/setup
+# changes (for example: service enablement regressions in setup_rootfs_gentoo.sh).
+mkdir -p "$rootfs_dir/$(dirname "$rootfs_stamp_relpath")"
+printf '%s\n' "$current_rootfs_stamp" > "$rootfs_dir/$rootfs_stamp_relpath"
 # ─── Mark first boot ─────────────────────────────────────────────────────────
 touch "$rootfs_dir/etc/shimboot-firstboot" 2>/dev/null || true
 

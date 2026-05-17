@@ -99,30 +99,44 @@ _install_stub_service root         ''      "Bypassing root remount on shimboot"
 _install_stub_service hwclock      clock   "Bypassing hardware clock access on shimboot"
 _install_stub_service swclock      clock   "Bypassing software clock restore on shimboot"
 
-# 2. kill-frecon service
-_step "Installing kill-frecon service (auto-enabled in sysinit)"
+# 2. kill-frecon helper
+_step "Installing kill-frecon helper (manual only; NOT auto-enabled)"
+# IMPORTANT (R11): dedede's shim 5.4 kernel has no framebuffer console.
+# frecon-lite is the only thing rendering pixels during early boot, and the
+# bootloader bind-mounts /dev/console to frecon's PTY specifically so init
+# output stays visible. Auto-starting kill-frecon in sysinit tears down that
+# console handoff before OpenRC reaches the login prompt, causing a black screen
+# or a verified-boot style bounce back to the secure-mode screen.
+#
+# Keep the helper installed for future Xorg/Wayland handoff work, but leave it
+# DISABLED in all boot runlevels. If a graphical session later needs DRM master,
+# it should call /usr/local/bin/kill_frecon --force immediately before taking
+# over the display.
 cat > /etc/init.d/kill-frecon <<'KILL_FRECON_RC'
 #!/sbin/openrc-run
-description="Kill frecon-lite to hand off DRM master to Xorg/Wayland"
+description="Manual frecon handoff helper for Xorg/Wayland"
 depend() {
   keyword -shutdown -boot
 }
 start() {
-  ebegin "Killing frecon-lite"
-  if [ -x /usr/local/bin/kill_frecon ]; then
-    /usr/local/bin/kill_frecon --force || true
-  else
-    pkill -TERM frecon-lite 2>/dev/null || true
+  ebegin "Handing off frecon"
+  if [ ! -x /usr/local/bin/kill_frecon ]; then
+    eerror "/usr/local/bin/kill_frecon is missing"
+    return 1
   fi
-  eend 0
+  /usr/local/bin/kill_frecon
+  eend $?
 }
 KILL_FRECON_RC
 chmod +x /etc/init.d/kill-frecon
+for rl in sysinit boot default shutdown; do
+  _disable_svc kill-frecon "$rl"
+done
+_log "  kill-frecon installed but left disabled in all runlevels"
 
 # 3. Enable services
 _step "Enabling core services"
 for s in sysfs devfs dmesg udev udev-trigger; do _enable_svc "$s" sysinit; done
-_enable_svc kill-frecon sysinit
 for s in fsck root localmount hwclock loopback hostname sysctl modules; do
   _enable_svc "$s" boot
 done

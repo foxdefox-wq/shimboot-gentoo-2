@@ -1,7 +1,78 @@
 # shimboot-gentoo-2 :: LLM handoff
 
-Last updated: 2026-05-16 (R10 — fix boot hang at "Starting local" / netmount blocking default runlevel)
+Last updated: 2026-05-16 (R11 — stop auto-killing frecon during Gentoo boot; add broad rootfs cache invalidation)
 Target hardware/log: dedede / ChromeOS shim kernel `5.4.85-22138-ga9994f5cad40` / Gentoo OpenRC + sysvinit
+
+---
+
+## R11 build fix
+
+### Problem
+
+A newer build regressed from the previously visible boot/login path and started
+falling back to the ChromeOS **"Return to secure mode"** screen shortly after:
+
+```text
+kill-frecon        |[kill_frecon ...] WARNING: no framebuffer console, but --force passed. Proceeding anyway.
+kill-frecon        |[kill_frecon ...] Phase 2: drop /dev/console bind mount
+kill-frecon        |[kill_frecon ...] Phase 3: SIGTERM frecon-lite
+udev               | Starting udev ...
+```
+
+On dedede shim kernel `5.4.85-22138-ga9994f5cad40`, frecon-lite is the only
+thing rendering pixels during boot. Auto-killing it in OpenRC sysinit removes
+the visible console handoff that shimboot's bootloader set up via a bind-mounted
+`/dev/console` → frecon PTY, reproducing the old black-screen/boot-bounce class
+of failure.
+
+### Root cause
+
+Commit `c06b4c9` accidentally changed Gentoo's `kill-frecon` helper from
+**manual-only** to **auto-enabled in `sysinit`**:
+
+- `_enable_svc kill-frecon sysinit`
+- init script calls `/usr/local/bin/kill_frecon --force`
+
+That directly contradicts the safety contract documented inside
+`rootfs/usr/local/bin/kill_frecon`, which explicitly says it must **not** be run
+at boot on dedede because there is **no framebuffer console** to take over after
+frecon exits.
+
+### Fix
+
+**`rootfs/opt/setup_rootfs_gentoo.sh`**
+- Keep `kill-frecon` installed only as a **manual helper** for future
+  Xorg/Wayland handoff work.
+- Do **not** enable it in any OpenRC boot runlevel.
+- Remove `--force` from the helper service itself.
+- Explicitly delete stale `kill-frecon` symlinks from `sysinit/boot/default/shutdown`.
+
+**`build_complete.sh`**
+- Replace the old patch-only cache stamp with a broader **rootfs content stamp**
+  covering `rootfs/`, `build_rootfs*.sh`, and `patches/systemd-*.patch`.
+- This forces a rebuild whenever rootfs setup logic changes, preventing future
+  regressions from hiding inside a reused cached rootfs.
+
+### What you need to do
+
+Because this is a **rootfs-level service enablement fix**, you must rebuild the
+rootfs (or manually remove the service from the installed image):
+
+```bash
+cd shimboot-gentoo-2
+sudo rm -rf data/rootfs_dedede_gentoo
+sudo ./build_complete.sh dedede
+```
+
+Manual rescue on an already-installed image:
+
+```bash
+rm -f /etc/runlevels/sysinit/kill-frecon
+rm -f /etc/runlevels/boot/kill-frecon
+rm -f /etc/runlevels/default/kill-frecon
+rm -f /etc/runlevels/shutdown/kill-frecon
+reboot
+```
 
 ---
 
@@ -68,7 +139,17 @@ Also added:
   which fails without elogind/XDG_RUNTIME_DIR).
 - `rc_parallel="YES"` to `/etc/rc.conf` — minor boot speed improvement.
 
-### Files changed in R10
+### Files changed in R11
+
+| File | Change |
+|------|--------|
+| `rootfs/opt/setup_rootfs_gentoo.sh` | Revert `kill-frecon` to manual-only helper; do not enable it in boot runlevels; remove `--force` from the helper service; explicitly disable stale symlinks. |
+| `build_complete.sh` | Replace patch-only cache stamp with a broader rootfs/setup stamp so rootfs-level regressions force rebuilds. |
+| `llms.txt` | Updated with R11 findings. |
+
+---
+
+## Files changed in R10
 
 | File | Change |
 |------|--------|
@@ -367,3 +448,4 @@ provided. Use `nmtui` to connect to Wi-Fi after login.
 | R8 | Stale rootfs cache had old 2-hunk patch from R5/earlier; mountpoint patch had 100-line offset | Wipe stale patch dir; add stamp-based cache invalidation; regenerate mountpoint patch with correct line numbers | Expected: patches apply; build completes; Wi-Fi stack loads. |
 | R9 | `nmcli device status` shows `wlan0 unmanaged` even after modules load; NM config `[device]` section was malformed | Corrected NM config sections in 99-shimboot.conf | Config now correct. |
 | R10 | Boot hangs forever after "Starting local ... [ ok ]" with no login prompt | Root cause: `netmount` in default runlevel blocks OpenRC because NM stays `inactive` (no Wi-Fi connection yet); also missing `rc_autostart_user="NO"` | Remove `netmount` from default runlevel; patch `/etc/rc.conf`. |
+| R11 | Boot regressed back to black-screen / secure-mode bounce after `kill-frecon` ran in sysinit | `kill-frecon` was accidentally auto-enabled with `--force`, despite dedede lacking fbcon | Revert to manual-only helper; add broad rootfs cache invalidation so setup changes force rebuilds. |
